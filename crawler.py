@@ -3,6 +3,8 @@ import logging
 
 import aiohttp
 
+from HTMLParser import HTMLParser
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,3 +77,8 @@ class AsyncCrawler:
 
     async def __aexit__(self, *exc) -> None:
         await self.close()
+
+
+    async def fetch_and_parse(self, url: str) -> dict:
+        html = await self.fetch_url(url)
+        return await HTMLParser().parse_html(html, url)
