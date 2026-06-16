@@ -59,8 +59,8 @@ class HTMLParser:
     def extract_text(self, soup: BeautifulSoup, selector: str = None) -> str:
         if selector:
             node = soup.select_one(selector)
-            return node.get_text(strip=True) if node else ""
-        return soup.get_text(strip=True)
+            return node.get_text(separator=" ", strip=True) if node else ""
+        return soup.get_text(separator=" ", strip=True)
 
 
     def extract_metadata(self, soup: BeautifulSoup) -> dict:

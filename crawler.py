@@ -80,5 +80,12 @@ class AsyncCrawler:
 
 
     async def fetch_and_parse(self, url: str) -> dict:
-        html = await self.fetch_url(url)
-        return await HTMLParser().parse_html(html, url)
+        parser = HTMLParser()
+        try:
+            html = await self.fetch_url(url)
+        except Exception as e:
+            logger.warning("Failed to fetch %s: %s", url, e)
+            result = parser._empty_result(url)
+            result["error"] = str(e)
+            return result
+        return await parser.parse_html(html, url)

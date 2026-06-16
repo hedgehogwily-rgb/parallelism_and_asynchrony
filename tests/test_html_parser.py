@@ -40,7 +40,7 @@ async def test_parse_valid_html():
     result = await parser.parse_html(VALID_HTML, BASE_URL)
     assert result["url"] == BASE_URL
     assert result["title"] == "Test Page"
-    assert "Hello" in result["text"]
+    assert "Hello world" in result["text"]
     assert result["metadata"]["description"] == "A test page"
     assert result["metadata"]["keywords"] == "test, html, parser"
 
@@ -92,11 +92,13 @@ async def test_extract_images_headings_tables_lists():
 
 
 @pytest.mark.asyncio
-async def test_fetch_and_parse_integration():
+async def test_fetch_and_parse_integration(base_url):
     from crawler import AsyncCrawler
 
+    target = f"{base_url}/page"
     async with AsyncCrawler(max_concurrent=2, total_timeout=10) as crawler:
-        result = await crawler.fetch_and_parse("https://example.com")
-    assert result["url"] == "https://example.com"
-    assert result["title"]
+        result = await crawler.fetch_and_parse(target)
+    assert result["url"] == target
+    assert result["title"] == "Local"
     assert isinstance(result["links"], list)
+    assert f"{base_url}/get" in result["links"]
