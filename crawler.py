@@ -37,6 +37,7 @@ class AsyncCrawler:
         self.visited_urls: set[str] = set()
         self.failed_urls: dict[str, str] = {}
         self.processed_urls: dict[str, dict] = {}
+        self._in_flight = 0
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -162,7 +163,10 @@ class AsyncCrawler:
             url = await self.queue.get_next()
             if url is None:
                 async with state_lock:
-                    if self.queue.get_stats()["queued"] == 0:
+                    if (
+                        self.queue.get_stats()["queued"] == 0
+                        and self._in_flight == 0
+                    ):
                         stop_event.set()
                         break
                 await asyncio.sleep(0.05)
@@ -173,19 +177,27 @@ class AsyncCrawler:
             async with state_lock:
                 if url in self.visited_urls or depth > effective_depth:
                     continue
-                self.visited_urls.add(url)
 
-            result = await self.fetch_and_parse(url)
-
-            async with state_lock:
-                if len(self.processed_urls) >= max_pages:
+                if len(self.processed_urls) + self._in_flight >= max_pages:
                     stop_event.set()
                     break
+                self.visited_urls.add(url)
+                self._in_flight += 1
+
+            try:
+                result = await self.fetch_and_parse(url)
+            except Exception:
+                async with state_lock:
+                    self._in_flight -= 1
+                raise
+
+            async with state_lock:
+                self._in_flight -= 1
 
                 if result.get("error"):
                     self.failed_urls[url] = result["error"]
                     self.queue.mark_failed(url, result["error"])
-                else:
+                elif len(self.processed_urls) < max_pages:
                     self.processed_urls[url] = result
                     self.queue.mark_processed(url)
 
@@ -205,6 +217,10 @@ class AsyncCrawler:
                                 self.queue.add_url(
                                     nlink, priority=depth + 1, depth=depth + 1
                                 )
+
+                if len(self.processed_urls) >= max_pages:
+                    stop_event.set()
+                    break
 
                 if len(self.processed_urls) % 5 == 0:
                     elapsed = max(0.001, time.perf_counter() - started_at)
@@ -230,6 +246,7 @@ class AsyncCrawler:
         self.visited_urls.clear()
         self.failed_urls.clear()
         self.processed_urls.clear()
+        self._in_flight = 0
         self.queue = CrawlerQueue()
 
         effective_depth = self.max_depth if max_depth is None else max_depth
@@ -349,8 +366,8 @@ class SemaphoreManager:
         domain = urlparse(url).netloc
         domain_sem = self._get_domain_sem(domain)
 
-        await self._global_sem.acquire()
         await domain_sem.acquire()
+        await self._global_sem.acquire()
 
         self.active_total += 1
         self.active_by_domain[domain] += 1
@@ -359,8 +376,8 @@ class SemaphoreManager:
         finally:
             self.active_total -= 1
             self.active_by_domain[domain] -= 1
-            domain_sem.release()
             self._global_sem.release()
+            domain_sem.release()
 
     def get_stats(self) -> dict:
         return {

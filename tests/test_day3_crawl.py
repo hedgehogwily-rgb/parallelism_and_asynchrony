@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from crawler import AsyncCrawler, CrawlerQueue
+from crawler import AsyncCrawler, CrawlerQueue, SemaphoreManager
 
 
 @pytest.mark.asyncio
@@ -216,3 +216,125 @@ async def test_crawl_no_duplicate_visits(monkeypatch):
 
     assert calls.get("https://example.com/a", 0) == 1
     assert len(crawler.visited_urls) == len(set(crawler.visited_urls))
+
+
+@pytest.mark.asyncio
+async def test_crawl_waits_for_in_flight_before_stop(monkeypatch):
+    """Empty queue while a worker is still fetching must not abort the crawl."""
+    graph = {
+        "https://example.com/root": [
+            "https://example.com/a",
+            "https://example.com/b",
+        ],
+        "https://example.com/a": [],
+        "https://example.com/b": [],
+    }
+
+    async def fake_fetch_and_parse(self, url: str):
+        await asyncio.sleep(0.15)
+        return {
+            "url": url,
+            "title": "t",
+            "text": "ok",
+            "links": graph.get(url, []),
+            "metadata": {},
+            "images": [],
+            "headings": [],
+            "tables": [],
+            "lists": [],
+        }
+
+    monkeypatch.setattr(AsyncCrawler, "fetch_and_parse", fake_fetch_and_parse)
+
+    crawler = AsyncCrawler(max_concurrent=3, max_depth=1)
+    results = await crawler.crawl(
+        start_urls=["https://example.com/root"],
+        max_pages=10,
+        same_domain_only=True,
+    )
+
+    assert "https://example.com/root" in results
+    assert "https://example.com/a" in results
+    assert "https://example.com/b" in results
+
+
+@pytest.mark.asyncio
+async def test_crawl_max_pages_limits_started_fetches(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_fetch_and_parse(self, url: str):
+        calls.append(url)
+        await asyncio.sleep(0.05)
+        return {
+            "url": url,
+            "title": "t",
+            "text": "ok",
+            "links": [],
+            "metadata": {},
+            "images": [],
+            "headings": [],
+            "tables": [],
+            "lists": [],
+        }
+
+    monkeypatch.setattr(AsyncCrawler, "fetch_and_parse", fake_fetch_and_parse)
+
+    crawler = AsyncCrawler(max_concurrent=3, max_depth=0)
+    results = await crawler.crawl(
+        start_urls=[
+            "https://example.com/a",
+            "https://example.com/b",
+            "https://example.com/c",
+        ],
+        max_pages=1,
+        same_domain_only=True,
+    )
+
+    assert len(results) == 1
+    assert len(calls) == 1
+    assert len(crawler.visited_urls) == 1
+
+
+@pytest.mark.asyncio
+async def test_semaphore_domain_first_allows_other_domains():
+    """Waiting on a busy domain must not block other domains via the global slot."""
+    sem = SemaphoreManager(
+        global_limit=2,
+        per_domain_limit=1,
+    )
+
+    order: list[str] = []
+    started = asyncio.Event()
+    release_a = asyncio.Event()
+
+    async def hold_domain_a():
+        async with sem.slot("https://a.com/1"):
+            order.append("a-start")
+            started.set()
+            await release_a.wait()
+            order.append("a-end")
+
+    async def wait_domain_a_again():
+        await started.wait()
+        async with sem.slot("https://a.com/2"):
+            order.append("a2")
+
+    async def use_domain_b():
+        await started.wait()
+        await asyncio.sleep(0.05)
+        async with sem.slot("https://b.com/1"):
+            order.append("b")
+
+    t_a = asyncio.create_task(hold_domain_a())
+    t_a2 = asyncio.create_task(wait_domain_a_again())
+    t_b = asyncio.create_task(use_domain_b())
+
+    await started.wait()
+    await asyncio.sleep(0.1)
+    # b must be able to run while a2 is still waiting for the domain slot
+    assert "b" in order
+    assert "a2" not in order
+
+    release_a.set()
+    await asyncio.gather(t_a, t_a2, t_b)
+    assert "a2" in order
